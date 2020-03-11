@@ -31,6 +31,7 @@ class hiro(object):
         self.c = c
         self.log = log
 
+        # * high level policy -- output goal
         self.high_policy = td3(
             observation_dim=self.observation_dim,
             g_a_dim=self.goal_dim,
@@ -51,9 +52,10 @@ class hiro(object):
             log=self.log
         )
 
+        # * low level policy -- output action
         self.low_policy = td3(
             observation_dim=self.observation_dim+self.goal_dim,
-            g_a_dim=self.goal_dim+self.action_dim,
+            g_a_dim=self.action_dim,
             batch_size=self.batch_size,
             level='low',
             learning_rate=1e-3,
@@ -78,19 +80,21 @@ class hiro(object):
         return np.array(observation) + np.array(goal) - np.array(next_observation)
 
     def get_action(self, observation, goal):
-        return self.low_policy.policy_net.act(torch.FloatTensor(np.expand_dims(observation + goal, 0)))
+        return self.low_policy.policy_net.act(torch.FloatTensor(np.concatenate([np.expand_dims(observation, 0), goal], 1)))
 
     def get_intrinsic_reward(self, observation, next_observation, goal):
+        # * generate the intrinsic reward
         delta = np.array(observation) + np.array(goal) - np.array(next_observation)
         return - np.linalg.norm(delta, 2)
 
     def store_high_traj(self, observation, goal, reward, next_observation, done, state_list, action_list):
-        self.high_policy.buffer.store(observation, goal, reward, next_observation, done, state_list, action_list)
+        self.high_policy.buffer.store([observation, goal, reward, next_observation, done, state_list, action_list])
 
     def store_low_traj(self, observation, goal, action, reward, next_observation, next_goal, done):
-        self.low_policy.buffer.store(observation, goal, action, reward, next_observation, next_goal, done)
+        self.low_policy.buffer.store([observation, goal, action, reward, next_observation, next_goal, done])
 
     def re_label(self):
+        # * relabel the goals which are in the high level policy's trajectories
         batch = random.sample(self.high_policy.buffer.memory, self.batch_size)
         for i in range(len(batch)):
             s_t = batch[i][0]
@@ -103,15 +107,16 @@ class hiro(object):
             probs = []
             for g_hat in candidates:
                 prob = 0
-                for j in range(self.c):
+                for j in range(self.c - 1):
                     s = batch[i][-2][j]
                     a = batch[i][-1][j]
                     s_ = batch[i][-2][j + 1]
-                    prob += - np.sum((a - self.low_policy.policy_net.act(torch.FloatTensor(s + g_hat))) ** 2)
+                    prob += - np.sum((a - self.low_policy.policy_net.act(torch.FloatTensor(np.concatenate([np.expand_dims(s, 0), g_hat], 1)))) ** 2)
                     g_hat = self.get_goal(s, s_, g_hat)
                 probs.append(prob)
             index = np.argmax(probs)
             g = candidates[index]
+            batch[i][1] = g
         return batch
 
     def train_high_policy(self):
@@ -126,11 +131,13 @@ class hiro(object):
 if __name__ == '__main__':
     env = gym.make('Pendulum-v0')
     episode = 10000
+    exploration = 1000
+    count = 0
     weight_reward = None
     c = 10
 
     observation_dim = env.observation_space.shape[0]
-    action_dim = env.action_space.n
+    action_dim = env.action_space.shape[0]
     model = hiro(
         observation_dim=observation_dim,
         goal_dim=observation_dim,
@@ -161,21 +168,22 @@ if __name__ == '__main__':
         step = 0
         action_list = []
         state_list = []
+        high_obs = obs
         while True:
             if step % c == 0:
                 goal = model.change_goal(obs)
                 model.high_policy.count += 1
-                high_obs = obs
                 high_goal = goal
                 if step != 0:
                     model.store_high_traj(high_obs, high_goal, c_reward, next_obs, done, state_list, action_list)
+                high_obs = obs
                 c_reward = 0
                 action_list = []
                 state_list = []
 
             action = model.get_action(obs, goal)
             model.low_policy.count += 1
-            next_obs, reward, done, info = env.step(action)
+            next_obs, reward, done, info = env.step([action.item()])
             total_reward += reward
             c_reward += reward
             intrinsic_reward = model.get_intrinsic_reward(obs, next_obs, goal)
@@ -184,13 +192,16 @@ if __name__ == '__main__':
             action_list.append(action)
             state_list.append(obs)
             obs = next_obs
+            step += 1
+            count += 1
 
             if done:
                 if not weight_reward:
                     weight_reward = total_reward
                 else:
                     weight_reward = 0.99 * weight_reward + 0.01 * total_reward
-
-                model.train_high_policy()
-                model.train_low_policy()
-                print('episode: {}  reward: {}  weight_reward: {:.2f}'.format(i+1, total_reward, weight_reward))
+                if count > exploration:
+                    model.train_high_policy()
+                    model.train_low_policy()
+                print('episode: {}  reward: {:.2f}  weight_reward: {:.2f}'.format(i+1, total_reward, weight_reward))
+                break

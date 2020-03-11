@@ -5,6 +5,7 @@ import numpy as np
 from replay_buffer import replay_buffer
 from torch.distributions import Normal
 from torch.utils.tensorboard import SummaryWriter
+import math
 
 
 class policy_net(nn.Module):
@@ -78,7 +79,7 @@ class td3(object):
         self.target_value_net2.load_state_dict(self.value_net2.state_dict())
         self.target_policy_net.load_state_dict(self.policy_net.state_dict())
 
-        self.buffer = replay_buffer(capacity=self.capacity, level=s)
+        self.buffer = replay_buffer(capacity=self.capacity, level=self.level)
 
         self.value_optimizer1 = torch.optim.Adam(self.value_net1.parameters(), lr=self.learning_rate)
         self.value_optimizer2 = torch.optim.Adam(self.value_net2.parameters(), lr=self.learning_rate)
@@ -106,15 +107,15 @@ class td3(object):
             for iter in range(self.update_iter):
                 observation, goal, reward, next_observation, done, _, _= zip(* batch)
 
-                observation = torch.FloatTensor(observation)
-                goal = torch.FloatTensor(goal).unsqueeze(1)
+                observation = torch.FloatTensor(np.vstack(observation))
+                goal = torch.FloatTensor(np.vstack(goal))
                 reward = torch.FloatTensor(reward).unsqueeze(1)
-                next_observation = torch.FloatTensor(next_observation)
+                next_observation = torch.FloatTensor(np.vstack(next_observation))
                 done = torch.FloatTensor(done).unsqueeze(1)
 
                 target_next_action = self.target_policy_net.forward(next_observation)
                 target_next_action = target_next_action + np.clip(np.random.randn() * self.epsilon(self.count), - self.noisy_range, self.noisy_range)
-                target_next_action = torch.tensor(np.clip(target_next_action.numpy(), self.min_a, self.max_a)).detach()
+                target_next_action = torch.FloatTensor(np.clip(target_next_action.detach().numpy(), self.min_a, self.max_a)).detach()
 
                 q_min = torch.min(self.target_value_net1.forward([next_observation, target_next_action]), self.target_value_net2.forward([next_observation, target_next_action]))
                 target_q = reward + (1 - done) * self.gamma * q_min.detach()
@@ -150,12 +151,12 @@ class td3(object):
             for iter in range(self.update_iter):
                 observation, goal, action, reward, next_observation, next_goal, done = zip(* batch)
 
-                observation = torch.FloatTensor(observation)
-                goal = torch.FloatTensor(goal).unsqueeze(1)
-                action = torch.FloatTensor(action).unsqueeze(1)
+                observation = torch.FloatTensor(np.vstack(observation))
+                goal = torch.FloatTensor(np.vstack(goal))
+                action = torch.FloatTensor(action).squeeze().unsqueeze(1)
                 reward = torch.FloatTensor(reward).unsqueeze(1)
-                next_observation = torch.FloatTensor(next_observation)
-                next_goal = torch.FloatTensor(next_goal)
+                next_observation = torch.FloatTensor(np.vstack(next_observation))
+                next_goal = torch.FloatTensor(np.vstack(next_goal))
                 done = torch.FloatTensor(done).unsqueeze(1)
 
                 target_next_action = self.target_policy_net.forward(torch.cat([next_observation, next_goal], 1))
